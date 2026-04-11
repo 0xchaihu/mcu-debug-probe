@@ -1,0 +1,30 @@
+# Optional local target mapping file for mcu-debug-probe.
+#
+# Place this file in the working directory as `pyocd-targets.yaml`,
+# or pass it explicitly with:
+#   --target-config path\to\pyocd-targets.yaml
+#
+# If the file does not exist yet, target-aware helper commands can prompt
+# for the local chip model and generate `pyocd-targets.yaml` automatically.
+#
+# The helper applies this mapping to any pyOCD operation that opens a
+# target session, such as attach, status, reset, flash, register reads,
+# memory reads, and breakpoint commands.
+
+# Optional vendor hint used to narrow fuzzy matches.
+vendor: NXP
+
+# Your local chip model string from a project file, BOM, or build metadata.
+chip_name: LPC55S69JBD100
+
+# Explicit overrides are the most reliable.
+aliases:
+  LPC55S69JBD100: lpc55s69
+  LPC55S69-EVK: lpc55s69
+  KE15-Z7: ke15z7
+
+# Optional glob-style fallbacks for families or package variants.
+patterns:
+  LPC55S69*: lpc55s69
+  MIMXRT1062*: mimxrt1060
+  STM32H743*: stm32h743xx

@@ -1,0 +1,7 @@
+interface:
+  display_name: "MCU Debug Probe"
+  short_description: "Control MCU probes over SWD or JTAG"
+  default_prompt: "Use $mcu-debug-probe to inspect, flash, reset, and debug an ARM Cortex-M target through a connected debug probe."
+
+policy:
+  allow_implicit_invocation: true
