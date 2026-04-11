@@ -1074,15 +1074,32 @@ def debug_session_responses_dir(session_id: str) -> Path:
     return debug_session_dir(session_id) / "responses"
 
 
+def _retry_on_permission_error(fn, description: str, max_retries: int = 5, delay: float = 0.05) -> Any:
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except PermissionError:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(delay)
+
+
 def write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
     temp_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-    temp_path.replace(path)
+
+    def _replace():
+        temp_path.replace(path)
+
+    _retry_on_permission_error(_replace, f"replace -> {path.name}")
 
 
 def read_json_file(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return _retry_on_permission_error(
+        lambda: json.loads(path.read_text(encoding="utf-8")),
+        f"read {path.name}",
+    )
 
 
 def update_session_metadata(session_id: str, **fields: Any) -> dict[str, Any]:
@@ -1219,7 +1236,11 @@ def send_session_request(
     deadline = time.time() + timeout_seconds
     while time.time() < deadline:
         if response_path.exists():
-            response = read_json_file(response_path)
+            try:
+                response = read_json_file(response_path)
+            except PermissionError:
+                time.sleep(0.05)
+                continue
             try:
                 response_path.unlink()
             except OSError:
@@ -1501,7 +1522,12 @@ def payload_breakpoint_set(
     target_class: Any,
 ) -> dict[str, Any]:
     bp_type = getattr(target_class.BreakpointType, args.breakpoint_type.upper())
+    was_running = session.target.get_target_context().core.is_running()
+    if was_running:
+        session.target.halt()
     created = session.target.set_breakpoint(args.address, bp_type)
+    if was_running:
+        session.target.resume()
     info = target_summary(session)
     status = "ok" if created else "error"
     summary = (
@@ -1509,7 +1535,7 @@ def payload_breakpoint_set(
         if created
         else f"Breakpoint could not be set at {format_hex(args.address)}."
     )
-    return build_payload(
+    payload = build_payload(
         status,
         summary,
         command="breakpoint-set",
@@ -1517,6 +1543,9 @@ def payload_breakpoint_set(
         breakpoint_type=args.breakpoint_type,
         **info,
     )
+    if was_running:
+        payload["auto_resumed"] = True
+    return payload
 
 
 def payload_breakpoint_clear(session, args: argparse.Namespace) -> dict[str, Any]:
@@ -1638,6 +1667,10 @@ def payload_vector_table(session, args: argparse.Namespace) -> dict[str, Any]:
 
 def payload_debug_close(session) -> dict[str, Any]:
     info = target_summary(session)
+    was_halted = info.get("state") == "HALTED"
+    if was_halted:
+        session.target.resume()
+    info = target_summary(session)
     return build_payload(
         "ok",
         "Debug session closed; session breakpoints were cleared.",
@@ -1646,6 +1679,7 @@ def payload_debug_close(session) -> dict[str, Any]:
         target_override=info.get("target_override"),
         board_target_type=info.get("board_target_type"),
         architecture=info.get("architecture"),
+        state=info.get("state"),
         registers=info.get("registers"),
     )
 

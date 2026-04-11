@@ -26,6 +26,7 @@ The same `SKILL.md` also works when this folder is installed under `~/.claude/sk
 - If the resolved target is missing locally, let the helper try CMSIS-Pack auto-install. It first tries direct names, then family-style fuzzy search such as `MCX A36x`, `MCXA366x`, or `a345x`. If one pack matches, it installs it; if multiple packs match, it reports retry suggestions like `MCXA365` or `MCXA365VLL`.
 - Default to read-only inspection until the user explicitly wants a hardware-changing action.
 - Prefer `debug-open` plus `debug-*` commands for multi-step debug flows that need a continuous session, persistent breakpoints, or a stable halted/running context.
+- Under Codex CLI, always run `debug-open` and any `debug-*` follow-up commands outside the sandbox. Do not probe persistent sessions in the sandbox first; Codex harnesses may reap detached child processes or deny required breakaway flags before the session server can service follow-up requests.
 - For `regs`, `stack`, `fault`, `step`, or breakpoint work on a running target, add `--halt-on-connect`.
 - Treat `flash`, `erase`, `reset`, and `mem-write` as mutating operations. Treat `halt`, `step`, `breakpoint-set`, and `breakpoint-clear` as debug-intrusive even when they are not destructive.
 - Before a mutating command, restate the probe selector, target, image path or address, and expected hardware impact; continue only after explicit confirmation.
