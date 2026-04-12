@@ -25,7 +25,7 @@ The same `SKILL.md` also works when this folder is installed under `~/.claude/sk
 - If the project uses a non-pyOCD chip name, resolve it through `pyocd-targets.yaml` or pass `--chip-name <model>` so the helper can create the YAML file. If the chip model is still unknown, ask the user instead of guessing.
 - If the resolved target is missing locally, let the helper try CMSIS-Pack auto-install. It first tries direct names, then family-style fuzzy search such as `MCX A36x`, `MCXA366x`, or `a345x`. If one pack matches, it installs it; if multiple packs match, it reports retry suggestions like `MCXA365` or `MCXA365VLL`.
 - Default to read-only inspection until the user explicitly wants a hardware-changing action.
-- Prefer `debug-open` plus `debug-*` commands for multi-step debug flows that need a continuous session, persistent breakpoints, or a stable halted/running context.
+- Prefer `debug-open` plus `debug-*` commands for multi-step debug flows that need a continuous session, persistent breakpoints, or a stable halted/running context. One-shot `mem-read` uses `connect_mode=attach` and does not halt the target; however, one-shot `halt`, `resume`, `regs`, and `step` still open/close a full pyOCD session per call, which halts the core on connect (default `connect_mode=halt`) and may disrupt real-time firmware.
 - Under Codex CLI, always run `debug-open` and any `debug-*` follow-up commands outside the sandbox. Do not probe persistent sessions in the sandbox first; Codex harnesses may reap detached child processes or deny required breakaway flags before the session server can service follow-up requests.
 - For `regs`, `stack`, `fault`, `step`, or breakpoint work on a running target, add `--halt-on-connect`.
 - Treat `flash`, `erase`, `reset`, and `mem-write` as mutating operations. Treat `halt`, `step`, `breakpoint-set`, and `breakpoint-clear` as debug-intrusive even when they are not destructive.
@@ -43,6 +43,7 @@ python mcu-debug-probe/scripts/pyocd_probe.py probe
 python mcu-debug-probe/scripts/pyocd_probe.py status --uid <probe>
 python mcu-debug-probe/scripts/pyocd_probe.py resolve-target --target-config pyocd-targets.yaml
 python mcu-debug-probe/scripts/pyocd_probe.py debug-open --uid <probe>
+python mcu-debug-probe/scripts/pyocd_probe.py debug-step --session <id> --count 1 --timeout 30
 python mcu-debug-probe/scripts/pyocd_probe.py flash --uid <probe> --image build/app.elf --yes
 ```
 
@@ -57,3 +58,5 @@ The helper prints a short summary first and a JSON object second. Use the JSON f
 - Reading registers from a running target without `--halt-on-connect`; some targets only expose meaningful core registers while halted.
 - Auto-selecting one debugger when more than one is attached; always make the user choose and pin the session with `--uid`.
 - Running mutating commands without repeating the image path or address; restate the exact target of the operation before executing it.
+- Interpreting a step that ends at the same breakpoint address as a no-op: ARM Cortex-M C_STEP has priority over FPB matches, so stepping at a breakpoint address works correctly and executes the instruction. If the step summary reports "pending interrupt re-entry", the steps did execute but a pending interrupt re-entered the handler and halted the CPU at the same breakpoint again.
+- Assuming one-shot `mem-read` halts the target; it uses `connect_mode=attach` and reads via AHB-AP without disturbing the core. Use `--halt-on-connect` if coherent register+memory snapshots are needed.

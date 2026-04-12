@@ -988,6 +988,18 @@ def session_options(args: argparse.Namespace) -> dict[str, Any]:
         options["resume_on_disconnect"] = False
     if getattr(args, "command", None) in {"halt", "step"} or getattr(args, "halt_after_reset", False):
         options["resume_on_disconnect"] = False
+    # The one-shot 'resume' command explicitly resumes the target; on
+    # disconnect pyOCD should NOT resume again (which would clear DHCSR
+    # C_DEBUGEN and DEMCR, disrupting any active debug configuration).
+    if getattr(args, "command", None) == "resume":
+        options["resume_on_disconnect"] = False
+    # One-shot mem-read should attach without halting the target so the
+    # running firmware is not disrupted.  It uses AHB-AP which does not
+    # require the core to be halted.  On disconnect, do not resume since
+    # we never halted.  (regs still requires halt, so it stays default.)
+    if getattr(args, "command", None) == "mem-read" and not getattr(args, "halt_on_connect", False):
+        options.setdefault("connect_mode", "attach")
+        options["resume_on_disconnect"] = False
     if getattr(args, "frequency", None):
         options["frequency"] = args.frequency
     if getattr(args, "halt_on_connect", False):
@@ -1503,15 +1515,94 @@ def payload_reset(session, args: argparse.Namespace, target_module: Any) -> dict
 
 
 def payload_step(session, args: argparse.Namespace) -> dict[str, Any]:
+    import signal as _signal
+
     target = session.target
-    for _ in range(args.count):
-        target.step(disable_interrupts=not args.allow_interrupts)
+    # Record the PC before stepping so we can detect interrupt-driven re-entry.
+    pre_step_pc: int | None = None
+    try:
+        pre_step_pc = int(target.read_core_register_raw("pc"))
+    except Exception:
+        pass
+
+    # Enable pyOCD's per-instruction timeout so a single step that stalls
+    # (e.g. WFI with C_MASKINTS, or lost SWD link) cannot hang forever.
+    # Default 5 s per instruction is generous; typical instructions
+    # complete in microseconds on a 12 MHz+ core.
+    per_instruction_timeout: float = getattr(args, "per_instruction_timeout", 5.0)
+    session.options.set("cpu.step.instruction.timeout", per_instruction_timeout)
+
+    # Session-level overall timeout as a belt-and-suspenders guard so the
+    # session server cannot get stuck even if pyOCD's own timeout leaks.
+    # Users can override via --timeout; default scales with count.
+    overall_timeout_s: float = getattr(args, "timeout", 0) or max(10.0, args.count * per_instruction_timeout * 1.5)
+    timed_out = False
+
+    def _step_timeout_handler(signum: int, frame: Any) -> None:  # type: ignore[type-arg]
+        nonlocal timed_out
+        timed_out = True
+        raise TimeoutError(f"Step loop timed out after {overall_timeout_s:.0f}s")
+
+    old_handler: Any = None
+    has_alarm = hasattr(_signal, "SIGALRM")
+    try:
+        if has_alarm:
+            old_handler = _signal.signal(_signal.SIGALRM, _step_timeout_handler)
+            _signal.alarm(int(overall_timeout_s))
+        for _ in range(args.count):
+            if timed_out:
+                break
+            target.step(disable_interrupts=not args.allow_interrupts)
+    except TimeoutError:
+        pass
+    finally:
+        if has_alarm and old_handler is not None:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, old_handler)
+
     info = target_summary(session)
+
+    # Detect interrupt-driven breakpoint re-entry: the step(s) executed
+    # correctly, but a pending interrupt re-entered a handler whose address
+    # still has a hardware breakpoint set, so the CPU halted there instead
+    # of at the expected post-step address.  A simple PC-equality check is
+    # not enough — a tight loop (while(1){}) naturally stays at the same PC
+    # after stepping, which is not a re-entry.  We only flag re-entry when
+    # the final PC matches an active breakpoint AND xPSR shows ISR context.
+    post_step_pc_raw = info.get("registers", {}).get("pc")
+    reentry_note = ""
+    if post_step_pc_raw is not None and args.count > 0:
+        post_pc = int(post_step_pc_raw, 16)
+        xpsr_raw = info.get("registers", {}).get("xpsr")
+        in_isr = xpsr_raw is not None and (int(xpsr_raw, 16) & 0x1FF) != 0
+        bp_at_post_pc = False
+        try:
+            # bp_manager lives on the core (CortexM), not the SoC target.
+            bp_manager = getattr(target, "bp_manager", None)
+            if bp_manager is None:
+                cores = getattr(target, "cores", {})
+                primary_core = cores.get(0, None)
+                if primary_core is not None:
+                    bp_manager = getattr(primary_core, "bp_manager", None)
+            if bp_manager is not None:
+                bp_at_post_pc = post_pc in bp_manager.get_breakpoints()
+        except Exception:
+            pass
+        # Re-entry: we ended up at a breakpoint address in ISR context.
+        if bp_at_post_pc and in_isr:
+            reentry_note = " (PC returned to a breakpoint address via pending interrupt re-entry)"
+
+    summary = (
+        f"step timed out after {overall_timeout_s:.0f}s; executed < {args.count} instruction(s); target state is {info['state']}."
+        if timed_out
+        else f"step succeeded for {args.count} instruction(s); target state is {info['state']}.{reentry_note}"
+    )
     return build_payload(
-        "ok",
-        f"step succeeded for {args.count} instruction(s); target state is {info['state']}.",
+        "ok" if not timed_out else "error",
+        summary,
         command="step",
         steps=args.count,
+        timed_out=timed_out,
         **info,
     )
 
@@ -2295,6 +2386,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Allow interrupts during step operations.",
     )
+    debug_step_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0,
+        help="Overall timeout in seconds for the entire step loop (0 = auto-scale with count).",
+    )
+    debug_step_parser.add_argument(
+        "--per-instruction-timeout",
+        type=float,
+        default=5.0,
+        help="Per-instruction timeout in seconds passed to pyOCD cpu.step.instruction.timeout (default 5.0).",
+    )
 
     debug_regs_parser = subparsers.add_parser("debug-regs", help="Read core registers inside a persistent debug session.")
     add_debug_session_ref(debug_regs_parser)
@@ -2421,6 +2524,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--allow-interrupts",
         action="store_true",
         help="Allow interrupts during step operations.",
+    )
+    step_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=0,
+        help="Overall timeout in seconds for the entire step loop (0 = auto-scale with count).",
+    )
+    step_parser.add_argument(
+        "--per-instruction-timeout",
+        type=float,
+        default=5.0,
+        help="Per-instruction timeout in seconds passed to pyOCD cpu.step.instruction.timeout (default 5.0).",
     )
 
     reset_parser = subparsers.add_parser("reset", help="Reset the target.")
