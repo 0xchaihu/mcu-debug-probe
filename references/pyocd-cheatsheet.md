@@ -34,7 +34,8 @@ python mcu-debug-probe/scripts/pyocd_probe.py resolve-target --target-config pyo
   - Retry with `--halt-on-connect`.
 - Target name resolution is wrong or ambiguous
   - Use `pyocd-targets.yaml`, `--chip-name`, or a more explicit `--target`.
-  - For fuzzy CMSIS-Pack matches, prefer the helper's retry suggestions such as `MCXA365` or `MCXA365VLL`.
+  - For fuzzy CMSIS-Pack matches, the helper uses pyOCD glob patterns such as `N236*`; direct partial names like `N236` can return no devices.
+  - Prefer the helper's retry suggestions such as `MCXA365`, `MCXA365VLL`, or `MCXN236VDF`.
 - `CMSIS-DAPv2` is unavailable
   - Run `probe-capabilities`.
   - Fix the host `libusb` runtime or accept CMSIS-DAPv1/HID if the probe firmware does not expose a v2 bulk interface.

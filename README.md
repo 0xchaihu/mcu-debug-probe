@@ -125,7 +125,7 @@ python mcu-debug-probe/scripts/pyocd_probe.py status --uid <probe-id> --chip-nam
 
 If the helper cannot uniquely infer the pyOCD target from the chip model you provide, it will ask for a more explicit pyOCD target name and save that mapping.
 
-If a resolved target is missing from the local pyOCD catalog, the helper now attempts to install the matching CMSIS-Pack automatically. It first tries direct device names, then family-style fuzzy search for inputs such as `MCX A36x`, `MCXA366x`, or shorthand family names like `a345x`. If the fuzzy search points to one pack, it installs it automatically and prefers the matching family target when pyOCD exposes one; if multiple packs match, it reports candidate packs with concrete retry suggestions such as `MCXA365` or `MCXA365VLL`. If pyOCD still cannot resolve the device afterward, it reports that support was not found locally or in the remote pack index.
+If a resolved target is missing from the local pyOCD catalog, the helper now attempts to install the matching CMSIS-Pack automatically. It first tries direct device names, then family-style fuzzy search with pyOCD glob patterns for inputs such as `MCX A36x`, `MCXA366`, `MCXA366x`, or shorthand family names like `a345x`. If the fuzzy search points to one pack, it installs it automatically and prefers the matching family target when pyOCD exposes one; if multiple packs match, it reports candidate packs with concrete retry suggestions such as `MCXA365` or `MCXA365VLL`. If pyOCD still cannot resolve the device afterward, it reports that support was not found locally or in the remote pack index.
 
 ## Command Reference
 

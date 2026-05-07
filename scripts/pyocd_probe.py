@@ -352,7 +352,26 @@ def pyocd_pack_search_terms(value: str) -> list[str]:
 
 
 def pyocd_pack_family_patterns(value: str) -> list[str]:
-    return [pattern.upper() for pattern in target_glob_patterns(value)]
+    patterns: list[str] = []
+    seen: set[str] = set()
+
+    def add(pattern: str) -> None:
+        text = pattern.strip().upper()
+        if not text or text in seen or ("*" not in text and "?" not in text):
+            return
+        seen.add(text)
+        patterns.append(text)
+
+    for pattern in target_glob_patterns(value):
+        add(pattern)
+    for token in target_token_variants(value, allow_glob=True):
+        if "*" in token or "?" in token:
+            add(token)
+        elif re.search(r"\d+x+$", token, flags=re.IGNORECASE):
+            add(re.sub(r"(?<=\d)x+$", "*", token, flags=re.IGNORECASE))
+        else:
+            add(f"{token}*")
+    return patterns
 
 
 def parse_pyocd_pack_find_output(output: str) -> list[dict[str, Any]]:
