@@ -53,9 +53,10 @@ def target_config_wizard_html(config_path: Path) -> str:
     }}
     body {{
       margin: 0;
-      min-height: 100vh;
-      padding: 28px;
+      height: 100vh;
+      padding: 20px 24px 24px;
       box-sizing: border-box;
+      overflow: hidden;
       background:
         linear-gradient(90deg, rgba(8, 127, 98, 0.06) 1px, transparent 1px),
         linear-gradient(180deg, rgba(183, 102, 53, 0.05) 1px, transparent 1px),
@@ -64,16 +65,19 @@ def target_config_wizard_html(config_path: Path) -> str:
     }}
     main {{
       width: min(1120px, 100%);
+      height: 100%;
       margin: 0 auto;
       display: grid;
       grid-template-columns: minmax(340px, 420px) minmax(0, 1fr);
-      gap: 18px;
-      align-items: start;
+      grid-template-rows: auto minmax(0, 1fr);
+      gap: 16px;
+      align-items: stretch;
+      min-height: 0;
     }}
     header {{
       grid-column: 1 / -1;
       position: relative;
-      padding: 0 0 18px 22px;
+      padding: 0 0 12px 22px;
       border-bottom: 1px solid var(--line);
     }}
     header::before {{
@@ -81,7 +85,7 @@ def target_config_wizard_html(config_path: Path) -> str:
       position: absolute;
       left: 0;
       top: 4px;
-      bottom: 18px;
+      bottom: 12px;
       width: 4px;
       border-radius: 999px;
       background: linear-gradient(var(--solder), var(--copper));
@@ -89,7 +93,7 @@ def target_config_wizard_html(config_path: Path) -> str:
     h1 {{
       margin: 0 0 6px;
       font-family: "Bahnschrift", "Segoe UI", Arial, sans-serif;
-      font-size: 28px;
+      font-size: 26px;
       line-height: 1.08;
       letter-spacing: 0;
       color: var(--ink);
@@ -100,22 +104,28 @@ def target_config_wizard_html(config_path: Path) -> str:
       line-height: 1.45;
     }}
     .intro {{
-      margin: 10px 0 0;
+      margin: 6px 0 0;
       max-width: 820px;
     }}
     section {{
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 20px;
+      padding: 18px;
       box-sizing: border-box;
       box-shadow: 0 18px 45px rgba(41, 52, 46, 0.08);
+      min-height: 0;
+    }}
+    .matches-panel {{
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
     }}
     h2 {{
       display: flex;
       align-items: center;
       gap: 9px;
-      margin: 0 0 16px;
+      margin: 0 0 12px;
       font-family: "Bahnschrift", "Segoe UI", Arial, sans-serif;
       font-size: 16px;
       line-height: 1.25;
@@ -133,8 +143,8 @@ def target_config_wizard_html(config_path: Path) -> str:
     }}
     .path {{
       display: block;
-      margin-top: 8px;
-      padding: 9px 11px;
+      margin-top: 6px;
+      padding: 7px 10px;
       border: 1px solid var(--line);
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.72);
@@ -147,7 +157,7 @@ def target_config_wizard_html(config_path: Path) -> str:
       display: flex;
       gap: 8px;
       flex-wrap: wrap;
-      margin-top: 12px;
+      margin-top: 8px;
     }}
     .status-chip {{
       display: inline-flex;
@@ -175,16 +185,16 @@ def target_config_wizard_html(config_path: Path) -> str:
     }}
     .guide {{
       display: grid;
-      gap: 8px;
-      margin: 0 0 18px;
-      padding: 13px 13px 13px 15px;
+      gap: 6px;
+      margin: 0 0 12px;
+      padding: 10px 12px;
       border: 1px solid var(--line);
       border-left: 4px solid var(--copper);
       border-radius: 7px;
       background: #fbfaf4;
       color: #3f4d47;
       font-size: 13px;
-      line-height: 1.45;
+      line-height: 1.35;
     }}
     .guide-title {{
       font-weight: 700;
@@ -195,12 +205,30 @@ def target_config_wizard_html(config_path: Path) -> str:
       padding-left: 20px;
     }}
     .guide li + li {{
-      margin-top: 4px;
+      margin-top: 2px;
+    }}
+    .mapping-panel {{
+      height: 100%;
+      max-height: 100%;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }}
+    #form {{
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      flex: 1;
+    }}
+    .form-scroll {{
+      min-height: 0;
+      overflow: auto;
+      padding-right: 2px;
     }}
     label {{
       display: grid;
       gap: 6px;
-      margin: 14px 0;
+      margin: 10px 0;
       font-size: 14px;
       font-weight: 700;
       color: #26332f;
@@ -210,7 +238,7 @@ def target_config_wizard_html(config_path: Path) -> str:
       box-sizing: border-box;
       border: 1px solid var(--line-strong);
       border-radius: 6px;
-      padding: 11px 12px;
+      padding: 9px 11px;
       font: inherit;
       font-weight: 400;
       color: var(--ink);
@@ -249,15 +277,20 @@ def target_config_wizard_html(config_path: Path) -> str:
       display: flex;
       gap: 12px;
       align-items: center;
-      margin-top: 20px;
+      margin: 12px -18px -18px;
+      padding: 12px 18px;
+      border-top: 1px solid var(--line);
+      background: linear-gradient(rgba(255, 254, 249, 0), var(--panel) 18px);
       flex-wrap: wrap;
+      flex-shrink: 0;
+      z-index: 2;
     }}
     button {{
       border: 0;
       border-radius: 6px;
       background: var(--solder);
       color: #ffffff;
-      padding: 11px 15px;
+      padding: 10px 14px;
       font: inherit;
       font-weight: 700;
       cursor: pointer;
@@ -274,9 +307,10 @@ def target_config_wizard_html(config_path: Path) -> str:
       display: grid;
       gap: 8px;
       min-height: 124px;
-      max-height: 60vh;
+      max-height: none;
       overflow: auto;
       padding-right: 2px;
+      flex: 1;
     }}
     .result {{
       width: 100%;
@@ -396,10 +430,61 @@ def target_config_wizard_html(config_path: Path) -> str:
     }}
     @media (max-width: 820px) {{
       body {{
+        height: auto;
+        min-height: 100vh;
+        overflow: auto;
         padding: 16px;
       }}
       main {{
+        height: auto;
         grid-template-columns: 1fr;
+        grid-template-rows: auto;
+      }}
+      .mapping-panel {{
+        position: static;
+        height: auto;
+        max-height: none;
+        overflow: visible;
+      }}
+      #form {{
+        display: block;
+      }}
+      .form-scroll {{
+        overflow: visible;
+        padding-right: 0;
+      }}
+      .matches-panel {{
+        display: block;
+      }}
+    }}
+    @media (max-height: 760px) and (min-width: 821px) {{
+      body {{
+        padding-top: 14px;
+      }}
+      header {{
+        padding-bottom: 8px;
+      }}
+      .intro {{
+        display: none;
+      }}
+      .source-status {{
+        margin-top: 6px;
+      }}
+      .guide {{
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: start;
+      }}
+      .guide ol {{
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        padding-left: 18px;
+      }}
+      .guide li + li {{
+        margin-top: 0;
+      }}
+      .field-help {{
+        display: none;
       }}
     }}
     @media (prefers-color-scheme: dark) {{
@@ -478,44 +563,46 @@ def target_config_wizard_html(config_path: Path) -> str:
       <p>Output file<span class="path">{escaped_path}</span></p>
       <div id="sourceStatus" class="source-status" aria-live="polite"></div>
     </header>
-    <section>
+    <section class="mapping-panel">
       <h2>Target Mapping</h2>
-      <div class="guide" role="note" aria-label="Setup steps">
-        <div class="guide-title">Typical flow</div>
-        <ol>
-          <li>Type the chip marking from the board or schematic.</li>
-          <li>Select the closest supported match from the list.</li>
-          <li>Save the mapping so the original command can continue.</li>
-        </ol>
-      </div>
       <form id="form">
-        <label>
-          Chip name
-          <input id="chipName" name="chip_name" required autocomplete="off" placeholder="LPC55S69JBD100">
-          <span class="field-help">Use the full package or part marking when possible. Broad family names such as MCX also work for search.</span>
-        </label>
-        <label>
-          Vendor
-          <input id="vendor" name="vendor" autocomplete="off" placeholder="NXP">
-          <span class="field-help">Optional. Leave blank unless the same part number appears under multiple vendors.</span>
-        </label>
-        <label>
-          pyOCD target
-          <input id="pyocdTarget" name="pyocd_target" autocomplete="off" placeholder="lpc55s69">
-          <span class="field-help">Usually filled by selecting a match. Enter it manually only if you already know the pyOCD target name.</span>
-        </label>
-        <label class="install-option">
-          <input id="installPack" name="install_pack" type="checkbox" checked disabled>
-          <span>Install required CMSIS-Pack</span>
-          <span class="field-help">Enabled when the selected remote match needs a pack that is not installed yet.</span>
-        </label>
+        <div class="form-scroll">
+          <div class="guide" role="note" aria-label="Setup steps">
+            <div class="guide-title">Typical flow</div>
+            <ol>
+              <li>Type the chip marking from the board or schematic.</li>
+              <li>Select the closest supported match from the list.</li>
+              <li>Save the mapping so the original command can continue.</li>
+            </ol>
+          </div>
+          <label>
+            Chip name
+            <input id="chipName" name="chip_name" required autocomplete="off" placeholder="LPC55S69JBD100">
+            <span class="field-help">Use the full package or part marking when possible. Broad family names such as MCX also work for search.</span>
+          </label>
+          <label>
+            Vendor
+            <input id="vendor" name="vendor" autocomplete="off" placeholder="NXP">
+            <span class="field-help">Optional. Leave blank unless the same part number appears under multiple vendors.</span>
+          </label>
+          <label>
+            pyOCD target
+            <input id="pyocdTarget" name="pyocd_target" autocomplete="off" placeholder="lpc55s69">
+            <span class="field-help">Usually filled by selecting a match. Enter it manually only if you already know the pyOCD target name.</span>
+          </label>
+          <label class="install-option">
+            <input id="installPack" name="install_pack" type="checkbox" checked disabled>
+            <span>Install required CMSIS-Pack</span>
+            <span class="field-help">Enabled when the selected remote match needs a pack that is not installed yet.</span>
+          </label>
+        </div>
         <div class="actions">
           <button id="submit" type="submit">Resolve and Save</button>
           <span id="status" role="status" aria-live="polite"></span>
         </div>
       </form>
     </section>
-    <section>
+    <section class="matches-panel">
       <h2>Supported Matches</h2>
       <p id="matchStatus" role="status" aria-live="polite">Start typing a chip name.</p>
       <div id="matches" class="result-list"></div>
