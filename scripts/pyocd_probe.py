@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import os
 import re
 import subprocess
 import string
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -41,7 +43,14 @@ DEBUG_SESSION_REQUEST_TIMEOUT_SECONDS = 15.0
 DEBUG_SESSION_IDLE_TIMEOUT_SECONDS = 900
 DEBUG_SESSION_POLL_SECONDS = 0.05
 PACK_INSTALL_TIMEOUT_SECONDS = 600
+PACK_FIND_SEARCH_TIMEOUT_SECONDS = 5
+PACK_FIND_UPDATE_TIMEOUT_SECONDS = 90
+TARGET_CONFIG_WIZARD_TIMEOUT_SECONDS = 300.0
+TARGET_CONFIG_WIZARD_ENV_VAR = "MCU_DEBUG_PROBE_NO_WIZARD"
 AUTO_PACK_INSTALL_ATTEMPTS: set[str] = set()
+PACK_FIND_INDEX_UPDATE_LOCK = threading.Lock()
+PACK_FIND_INDEX_UPDATE_ATTEMPTED = False
+PACK_FIND_INDEX_STATUS: dict[str, Any] = {"state": "not-started"}
 FAULT_REGISTERS = {
     "ICSR": 0xE000ED04,
     "SHCSR": 0xE000ED24,
@@ -657,8 +666,18 @@ def filter_catalog_by_vendor(catalog: list[dict[str, Any]], vendor: str | None) 
     if not vendor:
         return catalog
     vendor_text = vendor.strip().lower()
-    filtered = [entry for entry in catalog if vendor_text in str(entry.get("vendor", "")).lower()]
+    filtered = [entry for entry in catalog if vendor_matches(str(entry.get("vendor", "")), vendor_text)]
     return filtered or catalog
+
+
+def vendor_matches(candidate_vendor: str, vendor: str | None) -> bool:
+    if not vendor:
+        return True
+    candidate_text = normalize_target_name(candidate_vendor)
+    vendor_text = normalize_target_name(vendor)
+    if not candidate_text or not vendor_text:
+        return True
+    return vendor_text in candidate_text or candidate_text in vendor_text
 
 
 def _resolve_target_from_catalog_local(
@@ -811,6 +830,489 @@ def create_target_config_from_known_chip_name(
     return config_path
 
 
+def create_target_config_from_wizard_fields(
+    cwd: Path,
+    catalog: list[dict[str, Any]],
+    chip_name: str,
+    vendor: str | None = None,
+    explicit_target: str | None = None,
+    selected_pack: str | None = None,
+    selected_part_number: str | None = None,
+    selected_pack_installed: bool = False,
+    install_pack: bool = False,
+) -> dict[str, Any]:
+    config_path = cwd / DEFAULT_TARGET_CONFIG_FILENAMES[0]
+    raw_name = chip_name.strip()
+    if not raw_name:
+        raise RuntimeError("Chip name is required.")
+
+    vendor_hint = vendor.strip() if vendor else None
+    lookup_name = explicit_target.strip() if explicit_target else raw_name
+    if not lookup_name:
+        raise RuntimeError("pyOCD target was empty.")
+
+    try:
+        resolved = resolve_target_from_catalog(lookup_name, catalog, vendor=vendor_hint)
+    except RuntimeError as exc:
+        if explicit_target:
+            raise RuntimeError(f"pyOCD target '{lookup_name}' could not be resolved: {exc}") from exc
+        raise RuntimeError(
+            f"Could not uniquely resolve chip name '{raw_name}'. "
+            "Enter an explicit pyOCD target name and try again. "
+            f"Details: {exc}"
+        ) from exc
+
+    saved_vendor = resolved.get("vendor") or vendor_hint
+    dump_target_config(config_path, raw_name, resolved["target"], saved_vendor)
+    pack_install = install_wizard_selected_pack(
+        part_number=selected_part_number or resolved["target"],
+        pack=selected_pack,
+        already_installed=selected_pack_installed,
+        install_requested=install_pack,
+    )
+    return {
+        "path": config_path,
+        "chip_name": raw_name,
+        "target": resolved["target"],
+        "vendor": saved_vendor,
+        "source": resolved.get("source"),
+        "pack_install": pack_install,
+    }
+
+
+def install_wizard_selected_pack(
+    part_number: str | None,
+    pack: str | None,
+    already_installed: bool = False,
+    install_requested: bool = False,
+) -> dict[str, Any]:
+    raw_pack = (pack or "").strip()
+    raw_part = (part_number or "").strip()
+    if not install_requested:
+        return {"attempted": False, "reason": "not-requested"}
+    if not raw_pack:
+        return {"attempted": False, "reason": "no-selected-pack"}
+    if already_installed:
+        return {"attempted": False, "reason": "already-installed", "pack": raw_pack}
+    if not raw_part:
+        return {"attempted": False, "reason": "no-selected-part", "pack": raw_pack}
+
+    command = [sys.executable, "-m", "pyocd", "pack", "install", raw_part]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=PACK_INSTALL_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        return {
+            "attempted": True,
+            "success": False,
+            "pack": raw_pack,
+            "part_number": raw_part,
+            "error": friendly_exception(exc),
+        }
+
+    output = format_pack_command_output(completed)
+    return {
+        "attempted": True,
+        "success": completed.returncode == 0,
+        "pack": raw_pack,
+        "part_number": raw_part,
+        "returncode": completed.returncode,
+        "output": output,
+    }
+
+
+def catalog_entry_search_values(entry: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: Any) -> None:
+        if value is None:
+            return
+        if isinstance(value, (str, int, float)):
+            text = str(value).strip()
+            if text and text.lower() not in seen:
+                seen.add(text.lower())
+                values.append(text)
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                add(item)
+
+    for key in (
+        "name",
+        "part_number",
+        "vendor",
+        "family",
+        "families",
+        "part_families",
+        "source",
+        "svd",
+    ):
+        if key in entry:
+            add(entry.get(key))
+
+    for key in TARGET_CONFIG_NAME_KEYS:
+        if key in entry:
+            add(entry.get(key))
+
+    return values
+
+
+def score_catalog_match(query: str, values: list[str]) -> tuple[int, str] | None:
+    query_keys = target_search_keys(query)
+    query_globs = target_glob_patterns(query)
+    query_normalized = normalize_target_name(query)
+    query_compact = compact_target_name(query)
+    entry_keys: set[str] = set()
+    for value in values:
+        entry_keys |= target_search_keys(value)
+
+    if query_keys and query_keys & entry_keys:
+        return 0, "exact"
+    if query_globs and any(
+        fnmatch.fnmatch(candidate, pattern)
+        for pattern in query_globs
+        for candidate in entry_keys
+    ):
+        return 1, "family"
+    if any(
+        candidate.startswith(query_normalized) or candidate.startswith(query_compact)
+        for candidate in entry_keys
+    ):
+        return 2, "prefix"
+    if any(
+        query_normalized in candidate or query_compact in candidate
+        for candidate in entry_keys
+    ):
+        return 3, "contains"
+    return None
+
+
+def search_local_target_catalog_for_wizard(
+    catalog: list[dict[str, Any]],
+    query: str,
+    vendor: str | None = None,
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    raw_query = query.strip()
+    if not raw_query:
+        return []
+
+    filtered_catalog = filter_catalog_by_vendor(catalog, vendor)
+    matches: list[dict[str, Any]] = []
+
+    for entry in filtered_catalog:
+        name = str(entry.get("name", "")).strip()
+        part_number = str(entry.get("part_number", "")).strip()
+        entry_vendor = str(entry.get("vendor", "")).strip()
+        score = score_catalog_match(raw_query, catalog_entry_search_values(entry))
+        if score is None:
+            continue
+        match_score, match_kind = score
+        matches.append(
+            {
+                "target": name,
+                "part_number": part_number,
+                "vendor": entry_vendor,
+                "match": match_kind,
+                "source": "local",
+                "_score": match_score,
+            }
+        )
+
+    matches.sort(key=lambda item: (item["_score"], item["target"], item["part_number"]))
+    selected_matches = matches if limit <= 0 else matches[: max(1, limit)]
+    return [{key: value for key, value in item.items() if key != "_score"} for item in selected_matches]
+
+
+def pack_find_search_patterns(query: str) -> list[str]:
+    patterns: list[str] = []
+    seen: set[str] = set()
+
+    def add(pattern: str) -> None:
+        text = pattern.strip()
+        if not text:
+            return
+        key = text.upper()
+        if key in seen:
+            return
+        seen.add(key)
+        patterns.append(text)
+
+    raw = query.strip()
+    add(raw)
+    for term in pyocd_pack_search_terms(raw):
+        add(term)
+    for pattern in pyocd_pack_family_patterns(raw):
+        add(pattern)
+    compact = compact_search_token(raw)
+    if len(compact) >= 3:
+        add(f"{compact.upper()}*")
+    return patterns
+
+
+def set_pack_index_status(state: str, warning: str | None = None) -> None:
+    PACK_FIND_INDEX_STATUS.clear()
+    PACK_FIND_INDEX_STATUS["state"] = state
+    if warning:
+        PACK_FIND_INDEX_STATUS["warning"] = warning
+
+
+def reset_pack_index_status_for_wizard() -> dict[str, Any]:
+    global PACK_FIND_INDEX_UPDATE_ATTEMPTED
+
+    with PACK_FIND_INDEX_UPDATE_LOCK:
+        PACK_FIND_INDEX_UPDATE_ATTEMPTED = False
+        set_pack_index_status("not-started")
+    return pack_index_status_for_wizard()
+
+
+def pack_index_status_for_wizard() -> dict[str, Any]:
+    status = dict(PACK_FIND_INDEX_STATUS)
+    state = str(status.get("state", "not-started"))
+    if state == "updated":
+        status["pack_index_detail"] = "Remote CMSIS-Pack index updated"
+    elif state == "updating":
+        status["pack_index_detail"] = "Updating remote CMSIS-Pack index"
+    elif state == "error":
+        status["pack_index_detail"] = "Remote CMSIS-Pack index unavailable; showing local results only"
+    return status
+
+
+def update_pack_index_for_wizard(timeout_seconds: float = PACK_FIND_UPDATE_TIMEOUT_SECONDS) -> None:
+    set_pack_index_status("updating")
+    command = [sys.executable, "-m", "pyocd", "pack", "update"]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        set_pack_index_status(
+            "error",
+            f"Remote CMSIS-Pack index update timed out after {timeout_seconds:.0f}s.",
+        )
+        return
+    except Exception as exc:
+        set_pack_index_status("error", f"Remote CMSIS-Pack index update failed: {friendly_exception(exc)}")
+        return
+
+    output = format_pack_command_output(completed)
+    if completed.returncode != 0:
+        detail = output.splitlines()[0] if output else f"exit code {completed.returncode}"
+        set_pack_index_status("error", f"Remote CMSIS-Pack index update failed: {detail}")
+        return
+    set_pack_index_status("updated")
+
+
+def search_pack_index_for_wizard(
+    query: str,
+    vendor: str | None = None,
+    limit: int = 0,
+    timeout_seconds: float = PACK_FIND_SEARCH_TIMEOUT_SECONDS,
+    update_index: bool = True,
+) -> list[dict[str, Any]]:
+    global PACK_FIND_INDEX_UPDATE_ATTEMPTED
+
+    raw_query = query.strip()
+    if len(compact_search_token(raw_query)) < 3:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    seen_parts: set[str] = set()
+    if str(PACK_FIND_INDEX_STATUS.get("state")) == "error":
+        return []
+    if str(PACK_FIND_INDEX_STATUS.get("state")) == "updating":
+        return []
+    with PACK_FIND_INDEX_UPDATE_LOCK:
+        use_update = False
+        if update_index and not PACK_FIND_INDEX_UPDATE_ATTEMPTED:
+            PACK_FIND_INDEX_UPDATE_ATTEMPTED = True
+            use_update = True
+        if use_update:
+            update_pack_index_for_wizard()
+        if str(PACK_FIND_INDEX_STATUS.get("state")) == "error":
+            return []
+
+        for pattern in pack_find_search_patterns(raw_query)[:4]:
+            command = [sys.executable, "-m", "pyocd", "pack", "find"]
+            command.extend(["--no-header", pattern])
+            try:
+                completed = subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                set_pack_index_status(
+                    "error",
+                    f"Remote CMSIS-Pack index search timed out after {timeout_seconds:.0f}s.",
+                )
+                continue
+            except Exception as exc:
+                set_pack_index_status("error", f"Remote CMSIS-Pack index search failed: {friendly_exception(exc)}")
+                continue
+            if completed.returncode != 0:
+                output = format_pack_command_output(completed)
+                detail = output.splitlines()[0] if output else f"exit code {completed.returncode}"
+                set_pack_index_status("error", f"Remote CMSIS-Pack index search failed: {detail}")
+                continue
+            rows = parse_pyocd_pack_find_output(format_pack_command_output(completed))
+            for row in rows:
+                part = str(row.get("part", "")).strip()
+                row_vendor = str(row.get("vendor", "")).strip()
+                if not part:
+                    continue
+                key = part.lower()
+                if key in seen_parts:
+                    continue
+                score = score_catalog_match(raw_query, [part, row_vendor, str(row.get("pack", ""))])
+                if score is None:
+                    continue
+                match_score, match_kind = score
+                seen_parts.add(key)
+                matches.append(
+                    {
+                        "target": part,
+                        "part_number": part,
+                        "vendor": row_vendor,
+                        "match": "pack-installed" if row.get("installed") else f"pack-{match_kind}",
+                        "source": "pack",
+                        "pack": row.get("pack"),
+                        "version": row.get("version"),
+                        "installed": bool(row.get("installed")),
+                        "_score": match_score + (0 if row.get("installed") else 10),
+                        "_vendor_match": vendor_matches(row_vendor, vendor),
+                    }
+                )
+                if limit > 0 and len(matches) >= limit:
+                    break
+            if limit > 0 and len(matches) >= limit:
+                break
+
+    matches.sort(key=lambda item: (item["_score"], item["target"]))
+    vendor_filtered_matches = [item for item in matches if item.get("_vendor_match")]
+    if vendor and vendor_filtered_matches:
+        matches = vendor_filtered_matches
+    selected_matches = matches if limit <= 0 else matches[: max(1, limit)]
+    return [
+        {key: value for key, value in item.items() if key not in {"_score", "_vendor_match"}}
+        for item in selected_matches
+    ]
+
+
+def search_target_catalog_for_wizard(
+    catalog: list[dict[str, Any]],
+    query: str,
+    vendor: str | None = None,
+    limit: int = 0,
+) -> list[dict[str, Any]]:
+    raw_query = query.strip()
+    if not raw_query:
+        return []
+
+    unlimited = limit <= 0
+    requested_limit = 0 if unlimited else max(1, limit)
+    pack_quota = 0 if unlimited else min(6, max(2, requested_limit // 3))
+    local_limit = 0 if unlimited else max(1, requested_limit - pack_quota)
+    local_matches = search_local_target_catalog_for_wizard(
+        catalog=catalog,
+        query=raw_query,
+        vendor=vendor,
+        limit=local_limit,
+    )
+    remaining_limit = 0 if unlimited else max(pack_quota, requested_limit - len(local_matches))
+    pack_matches = search_pack_index_for_wizard(
+        query=raw_query,
+        vendor=vendor,
+        limit=remaining_limit,
+    )
+
+    seen_targets = {str(match.get("target", "")).lower() for match in local_matches}
+    combined = list(local_matches)
+    for match in pack_matches:
+        target = str(match.get("target", "")).lower()
+        if target in seen_targets:
+            continue
+        seen_targets.add(target)
+        combined.append(match)
+        if not unlimited and len(combined) >= requested_limit:
+            break
+    return combined if unlimited else combined[:requested_limit]
+
+
+def target_config_wizard_disabled(args: argparse.Namespace) -> bool:
+    if getattr(args, "no_target_config_wizard", False):
+        return True
+    return os.environ.get(TARGET_CONFIG_WIZARD_ENV_VAR, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def run_target_config_wizard(
+    cwd: Path,
+    catalog: list[dict[str, Any]],
+    output_fn=print,
+    timeout_seconds: float = TARGET_CONFIG_WIZARD_TIMEOUT_SECONDS,
+) -> Path | None:
+    from target_config_wizard import run_target_config_wizard as run_wizard
+
+    def save_config_from_wizard(
+        chip_name: str,
+        vendor: str | None,
+        explicit_target: str | None,
+        selected_pack: str | None,
+        selected_part_number: str | None,
+        selected_pack_installed: bool,
+        install_pack: bool,
+    ) -> dict[str, Any]:
+        return create_target_config_from_wizard_fields(
+            cwd=cwd,
+            catalog=catalog,
+            chip_name=chip_name,
+            vendor=vendor,
+            explicit_target=explicit_target,
+            selected_pack=selected_pack,
+            selected_part_number=selected_part_number,
+            selected_pack_installed=selected_pack_installed,
+            install_pack=install_pack,
+        )
+
+    return run_wizard(
+        cwd=cwd,
+        catalog=catalog,
+        config_filename=DEFAULT_TARGET_CONFIG_FILENAMES[0],
+        save_config_fn=save_config_from_wizard,
+        search_catalog_fn=lambda query, vendor, limit: search_target_catalog_for_wizard(
+            catalog=catalog,
+            query=query,
+            vendor=vendor,
+            limit=limit,
+        ),
+        output_fn=output_fn,
+        timeout_seconds=timeout_seconds,
+        catalog_status={
+            "local_target_count": len(catalog),
+            "pack_index_search": True,
+        },
+        catalog_status_fn=pack_index_status_for_wizard,
+        retry_pack_index_fn=reset_pack_index_status_for_wizard,
+    )
+
+
 def resolve_target_metadata(
     args: argparse.Namespace,
     catalog: list[dict[str, Any]] | None = None,
@@ -838,10 +1340,19 @@ def resolve_target_metadata(
         return None
 
     if config_path is None:
+        if not target_config_wizard_disabled(args):
+            config_path = run_target_config_wizard(
+                cwd=cwd,
+                catalog=catalog,
+                output_fn=output_fn,
+            )
+
+    if config_path is None:
         if not can_prompt_for_target_config(interactive):
             raise RuntimeError(
                 f"No {DEFAULT_TARGET_CONFIG_FILENAMES[0]} was found in {cwd}. "
-                "Ask the user for the MCU model, pass --chip-name, or create the YAML file before retrying."
+                "Use the local target config wizard, pass --chip-name, or create the YAML file before retrying. "
+                f"Disable the wizard with --no-target-config-wizard or {TARGET_CONFIG_WIZARD_ENV_VAR}=1."
             )
         config_path = prompt_to_create_target_config(
             cwd=cwd,
@@ -2332,6 +2843,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    def add_target_config_wizard_option(session_parser: argparse.ArgumentParser) -> None:
+        session_parser.add_argument(
+            "--no-target-config-wizard",
+            action="store_true",
+            help="Disable the local browser wizard used to create pyocd-targets.yaml when it is missing.",
+        )
+
     def add_common(session_parser: argparse.ArgumentParser) -> None:
         session_parser.add_argument("--uid", help="Probe unique ID or unique prefix.")
         session_parser.add_argument("--target", help="Explicit pyOCD target override.")
@@ -2343,6 +2861,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--target-config",
             help="Optional YAML file describing the local chip model and/or alias mappings for pyOCD target names.",
         )
+        add_target_config_wizard_option(session_parser)
         session_parser.add_argument(
             "--frequency",
             type=parse_int,
@@ -2379,6 +2898,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-config",
         help="Optional YAML file describing the local chip model and/or alias mappings for pyOCD target names.",
     )
+    add_target_config_wizard_option(resolve_parser)
     debug_open_parser = subparsers.add_parser("debug-open", help="Open a persistent debug session.")
     add_common(debug_open_parser)
     debug_open_parser.add_argument(

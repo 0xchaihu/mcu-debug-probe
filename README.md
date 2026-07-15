@@ -107,9 +107,34 @@ patterns:
 
 ### If No YAML Exists Yet
 
-Target-aware commands can generate `pyocd-targets.yaml` automatically when you already know the local chip model and pass it with `--chip-name`.
+When a target-aware command needs a mapping and no `pyocd-targets.yaml` exists, the helper opens a temporary local browser wizard at `127.0.0.1`. The wizard is served by `scripts/target_config_wizard.py`; `scripts/pyocd_probe.py` only starts it and keeps using the existing target resolver and YAML writer.
 
-If you do not know the chip model yet, ask for it first instead of guessing.
+Target-aware commands include `resolve-target`, `debug-open`, `attach`/`status`, `halt`, `resume`, `step`, `reset`, `flash`, `erase`, `regs`, `mem-read`, `mem-write`, `stack`, `fault`, `exception-frame`, `vector-table`, `breakpoint-set`, and `breakpoint-clear`.
+
+Enter the chip name and the page searches while you type. Results include local pyOCD targets that are already available and CMSIS-Pack index candidates that pyOCD can find but may not have installed yet. The page shows all returned matches, so broad queries such as `MCX` may produce a long scrollable list; type a more specific family or part number to narrow it. You can click a supported match to fill the pyOCD target field, optionally narrow the match with a vendor, or manually provide an explicit pyOCD target name if automatic resolution is ambiguous.
+
+When you click **Resolve and Save**, the wizard writes `pyocd-targets.yaml`. If the selected match came from a remote CMSIS-Pack result that is not installed yet, the **Install required CMSIS-Pack** option is enabled and checked by default; saving then runs `pyocd pack install <selected-part-number>` after writing the YAML file. If pack installation fails, the YAML file is kept and the page reports the install failure. The wizard does not connect to hardware, reset, halt, erase, or flash the target.
+
+Disable the browser wizard for CI, scripts, or headless sessions with either:
+
+```sh
+python mcu-debug-probe/scripts/pyocd_probe.py status --no-target-config-wizard
+```
+
+PowerShell:
+
+```powershell
+$env:MCU_DEBUG_PROBE_NO_WIZARD = "1"
+python mcu-debug-probe/scripts/pyocd_probe.py status
+```
+
+bash/zsh:
+
+```sh
+MCU_DEBUG_PROBE_NO_WIZARD=1 python mcu-debug-probe/scripts/pyocd_probe.py status
+```
+
+Target-aware commands can still generate `pyocd-targets.yaml` without the browser when you already know the local chip model and pass it with `--chip-name`.
 
 For example:
 
@@ -129,12 +154,14 @@ If a resolved target is missing from the local pyOCD catalog, the helper now att
 
 ## Command Reference
 
+Any command in the table that needs a pyOCD target can open the local browser wizard when no `pyocd-targets.yaml` is present. Pass `--target`, `--chip-name`, `--no-target-config-wizard`, or `MCU_DEBUG_PROBE_NO_WIZARD=1` when you need to avoid the browser.
+
 | Goal | Command | Notes |
 | --- | --- | --- |
 | Enumerate probes | `python mcu-debug-probe/scripts/pyocd_probe.py probe` | Safe, read-only first step. |
 | Inspect probe capabilities | `python mcu-debug-probe/scripts/pyocd_probe.py probe-capabilities` | Reports whether each connected probe is seen as CMSIS-DAPv1, CMSIS-DAPv2, J-Link, etc. |
-| Resolve a local chip name | `python mcu-debug-probe/scripts/pyocd_probe.py resolve-target --target-config pyocd-targets.yaml` | Resolves local board naming to a pyOCD target without touching hardware. If the YAML file is missing and you already know the chip model, pass `--chip-name <model>` to generate it automatically. |
-| Attach and summarize state | `python mcu-debug-probe/scripts/pyocd_probe.py status --uid <probe-id>` | Captures target state and common registers. Add `--target-config pyocd-targets.yaml` when local chip naming needs translation. |
+| Resolve a local chip name | `python mcu-debug-probe/scripts/pyocd_probe.py resolve-target --target-config pyocd-targets.yaml` | Resolves local board naming to a pyOCD target without touching hardware. If the YAML file is missing, the local browser wizard opens by default; pass `--chip-name <model>` to generate it directly. |
+| Attach and summarize state | `python mcu-debug-probe/scripts/pyocd_probe.py status --uid <probe-id>` | Captures target state and common registers. Add `--target-config pyocd-targets.yaml` when local chip naming needs translation, or let the wizard create it when it is missing. |
 | Halt or resume | `python mcu-debug-probe/scripts/pyocd_probe.py halt --uid <probe-id>` | Use `resume` to continue execution. |
 | Read registers | `python mcu-debug-probe/scripts/pyocd_probe.py regs --uid <probe-id> --halt-on-connect --registers pc sp lr xpsr` | Register names are passed through to pyOCD. |
 | Read memory | `python mcu-debug-probe/scripts/pyocd_probe.py mem-read --uid <probe-id> --address 0x20000000 --width 32 --count 8` | Width is `8`, `16`, or `32`. |
